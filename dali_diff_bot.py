@@ -277,21 +277,37 @@ class RealGeminiAnalyzer:
             """
             
             if ai_engine == "gauss":
+                # Gauss API는 전체 URL을 직접 사용 (예: https://.../v1/chat/completions)
                 url = gauss_endpoint.strip()
-                if not url.endswith("/chat/completions"):
-                    url = url.rstrip('/') + "/chat/completions"
-                    
+
+                # 기본 모델명 설정
+                model_name = gauss_model.strip() if gauss_model else "GaussO4_Think_250902-fp8"
+
                 payload = {
-                    "model": gauss_model.strip() if gauss_model else "gauss",
-                    "messages": [{"role": "user", "content": prompt}]
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "top_p": 0.96,
+                    "repetition_penalty": 1.03,
+                    "stream": False
                 }
-                headers = {'Content-Type': 'application/json'}
-                if gauss_key: headers['Authorization'] = f"Bearer {gauss_key}"
+                headers = {
+                    'Content-Type': 'application/json',
+                    'accept': '*/*'
+                }
+                # Gauss API는 Basic 인증 사용 (Bearer가 아님)
+                # gauss_key는 이미 JavaScript에서 Base64 인코딩된 값
+                if gauss_key:
+                    headers['Authorization'] = f"Basic {gauss_key}"
+                    # 디버깅용 로그
+                    print(f"[DEBUG] Gauss API Request URL: {url}")
+                    print(f"[DEBUG] Gauss API Model: {model_name}")
+                    print(f"[DEBUG] Authorization Header: Basic {gauss_key[:20]}...")
                 
                 req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
                 with urllib.request.urlopen(req) as resp:
                     data = json.loads(resp.read().decode('utf-8'))
-                    # OpenAI 호환 규격 파싱 (Langchain ChatOpenAI와 동일)
+                    # OpenAI 호환 규격 파싱
                     html_res = data['choices'][0]['message']['content']
                     return html_res.replace("```html", "").replace("```", "")
             else:
@@ -408,18 +424,22 @@ HTML_CONTENT = """
         
         <div id="cfg-gauss-group" style="display: none; background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); margin-bottom: 15px;">
             <div class="input-group">
-                <label>Gauss Base URL (OpenAI 호환)</label>
-                <input type="text" id="cfg-gauss-endpoint" placeholder="예: https://api.samsung.net/v1">
+                <label>Gauss API Endpoint URL</label>
+                <input type="text" id="cfg-gauss-endpoint" placeholder="예: https://inference-webtrial-api.shuttle.sr-cloud.com/gauss-o4-think/v1/chat/completions">
             </div>
             <div class="input-group">
-                <label>API Key (인증 토큰)</label>
-                <input type="password" id="cfg-gauss-key" placeholder="발급받은 Key 입력">
+                <label>Access Key</label>
+                <input type="password" id="cfg-gauss-access-key" placeholder="발급받은 Access Key">
             </div>
             <div class="input-group">
-                <label>Model Name (선택적)</label>
-                <input type="text" id="cfg-gauss-model" placeholder="예: gauss-language-v1">
+                <label>Secret Key</label>
+                <input type="password" id="cfg-gauss-secret-key" placeholder="발급받은 Secret Key">
             </div>
-            <p style="font-size:11px; color:#888; margin:0;">* Langchain의 ChatOpenAI와 100% 동일한 규격으로 통신합니다.</p>
+            <div class="input-group">
+                <label>Model Name</label>
+                <input type="text" id="cfg-gauss-model" placeholder="예: GaussO4_Think_250902-fp8">
+            </div>
+            <p style="font-size:11px; color:#888; margin:0;">* Access Key와 Secret Key는 자동으로 Base64 인코딩됩니다.</p>
         </div>
 
         <h4 style="margin-bottom:10px; border-bottom:1px solid #333; padding-bottom:5px;">🔐 Gerrit 인증 방식 (선택)</h4>
@@ -480,7 +500,8 @@ HTML_CONTENT = """
         document.getElementById('cfg-gerrit-user').value = localStorage.getItem('gerrit_user') || '';
         document.getElementById('cfg-gerrit-pass').value = localStorage.getItem('gerrit_pass') || '';
         document.getElementById('cfg-gauss-endpoint').value = localStorage.getItem('gauss_endpoint') || '';
-        document.getElementById('cfg-gauss-key').value = localStorage.getItem('gauss_key') || '';
+        document.getElementById('cfg-gauss-access-key').value = localStorage.getItem('gauss_access_key') || '';
+        document.getElementById('cfg-gauss-secret-key').value = localStorage.getItem('gauss_secret_key') || '';
         document.getElementById('cfg-gauss-model').value = localStorage.getItem('gauss_model') || '';
         
         const engineType = localStorage.getItem('ai_engine_type') || 'gemini';
@@ -509,7 +530,8 @@ HTML_CONTENT = """
         
         localStorage.setItem('ai_engine_type', document.getElementById('engine-gauss').checked ? 'gauss' : 'gemini');
         localStorage.setItem('gauss_endpoint', document.getElementById('cfg-gauss-endpoint').value);
-        localStorage.setItem('gauss_key', document.getElementById('cfg-gauss-key').value);
+        localStorage.setItem('gauss_access_key', document.getElementById('cfg-gauss-access-key').value);
+        localStorage.setItem('gauss_secret_key', document.getElementById('cfg-gauss-secret-key').value);
         localStorage.setItem('gauss_model', document.getElementById('cfg-gauss-model').value);
         closeSettings();
     }
@@ -573,6 +595,15 @@ HTML_CONTENT = """
         document.querySelectorAll('.ai-review-section').forEach(el => el.style.display = showReview ? 'block' : 'none');
     }
 
+    // Base64 인코딩 함수
+    function base64Encode(str) {
+        try {
+            return btoa(unescape(encodeURIComponent(str)));
+        } catch (e) {
+            return btoa(str);
+        }
+    }
+
     async function startAnalysis() {
         const urls = document.getElementById('pr-links').value.split('\\n').filter(u => u.trim() !== '');
         if(urls.length === 0) return alert("PR 링크를 입력해주세요.");
@@ -583,6 +614,14 @@ HTML_CONTENT = """
         loader.style.display = 'block';
         resultBox.style.display = 'none';
 
+        // Gauss API Key Base64 인코딩 (access_key:secret_key)
+        const accessKey = localStorage.getItem('gauss_access_key') || '';
+        const secretKey = localStorage.getItem('gauss_secret_key') || '';
+        let gaussKeyEncoded = '';
+        if (accessKey && secretKey) {
+            gaussKeyEncoded = base64Encode(accessKey + ':' + secretKey);
+        }
+
         try {
             const response = await fetch('/api/parse_pr', { 
                 method: 'POST',
@@ -591,7 +630,7 @@ HTML_CONTENT = """
                     urls: urls,
                     ai_engine_type: localStorage.getItem('ai_engine_type') || 'gemini',
                     gauss_endpoint: localStorage.getItem('gauss_endpoint') || '',
-                    gauss_key: localStorage.getItem('gauss_key') || '',
+                    gauss_key: gaussKeyEncoded,
                     gauss_model: localStorage.getItem('gauss_model') || '',
                     ai_key: localStorage.getItem('ai_key'),
                     ai_model: localStorage.getItem('ai_model') || '',
