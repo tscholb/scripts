@@ -202,7 +202,7 @@ def parse_github_pr(url):
         return {"error": f"GitHub 파싱 실패: {str(e)}"}
 
 class RealGeminiAnalyzer:
-    def analyze(self, meta_data, diff_data, ai_key, ai_model="gemini-3-flash", ai_engine="gemini", gauss_endpoint="", gauss_key=""):
+    def analyze(self, meta_data, diff_data, ai_key, ai_model="gemini-3-flash", ai_engine="gemini", gauss_endpoint="", gauss_key="", gauss_model=""):
         if ai_engine == "gemini" and not ai_key:
             return """
             <div style="background: rgba(255, 77, 77, 0.1); border: 1px solid rgba(255, 77, 77, 0.3); padding: 20px; border-radius: 8px; margin-top: 15px;">
@@ -277,16 +277,22 @@ class RealGeminiAnalyzer:
             """
             
             if ai_engine == "gauss":
-                if not gauss_endpoint: gauss_endpoint = "https://gauss.example.net/api/v1/generate"
-                payload = {"messages": [{"role": "user", "content": prompt}]}
+                url = gauss_endpoint.strip()
+                if not url.endswith("/chat/completions"):
+                    url = url.rstrip('/') + "/chat/completions"
+                    
+                payload = {
+                    "model": gauss_model.strip() if gauss_model else "gauss",
+                    "messages": [{"role": "user", "content": prompt}]
+                }
                 headers = {'Content-Type': 'application/json'}
                 if gauss_key: headers['Authorization'] = f"Bearer {gauss_key}"
                 
-                req = urllib.request.Request(gauss_endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers)
+                req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
                 with urllib.request.urlopen(req) as resp:
                     data = json.loads(resp.read().decode('utf-8'))
-                    # Gauss 응답 포맷에 맞게 수정 필요 시 이 부분을 변경합니다.
-                    html_res = data.get('message', data.get('response', data.get('text', 'Gauss 응답 수신 성공')))
+                    # OpenAI 호환 규격 파싱 (Langchain ChatOpenAI와 동일)
+                    html_res = data['choices'][0]['message']['content']
                     return html_res.replace("```html", "").replace("```", "")
             else:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{ai_model}:generateContent?key={ai_key}"
@@ -402,14 +408,18 @@ HTML_CONTENT = """
         
         <div id="cfg-gauss-group" style="display: none; background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); margin-bottom: 15px;">
             <div class="input-group">
-                <label>Gauss API Endpoint URL</label>
-                <input type="text" id="cfg-gauss-endpoint" placeholder="예: https://api.gauss.samsung.net/.../generate">
+                <label>Gauss Base URL (OpenAI 호환)</label>
+                <input type="text" id="cfg-gauss-endpoint" placeholder="예: https://api.samsung.net/v1">
             </div>
             <div class="input-group">
-                <label>Gauss API Key / Token</label>
-                <input type="password" id="cfg-gauss-key" placeholder="Gauss 인증 토큰">
+                <label>API Key (인증 토큰)</label>
+                <input type="password" id="cfg-gauss-key" placeholder="발급받은 Key 입력">
             </div>
-            <p style="font-size:11px; color:#888; margin:0;">* 사내 망 전용 Gauss API 스펙에 맞춰 연동을 설정합니다.</p>
+            <div class="input-group">
+                <label>Model Name (선택적)</label>
+                <input type="text" id="cfg-gauss-model" placeholder="예: gauss-language-v1">
+            </div>
+            <p style="font-size:11px; color:#888; margin:0;">* Langchain의 ChatOpenAI와 100% 동일한 규격으로 통신합니다.</p>
         </div>
 
         <h4 style="margin-bottom:10px; border-bottom:1px solid #333; padding-bottom:5px;">🔐 Gerrit 인증 방식 (선택)</h4>
@@ -471,6 +481,7 @@ HTML_CONTENT = """
         document.getElementById('cfg-gerrit-pass').value = localStorage.getItem('gerrit_pass') || '';
         document.getElementById('cfg-gauss-endpoint').value = localStorage.getItem('gauss_endpoint') || '';
         document.getElementById('cfg-gauss-key').value = localStorage.getItem('gauss_key') || '';
+        document.getElementById('cfg-gauss-model').value = localStorage.getItem('gauss_model') || '';
         
         const engineType = localStorage.getItem('ai_engine_type') || 'gemini';
         document.getElementById(engineType === 'gauss' ? 'engine-gauss' : 'engine-gemini').checked = true;
@@ -499,6 +510,7 @@ HTML_CONTENT = """
         localStorage.setItem('ai_engine_type', document.getElementById('engine-gauss').checked ? 'gauss' : 'gemini');
         localStorage.setItem('gauss_endpoint', document.getElementById('cfg-gauss-endpoint').value);
         localStorage.setItem('gauss_key', document.getElementById('cfg-gauss-key').value);
+        localStorage.setItem('gauss_model', document.getElementById('cfg-gauss-model').value);
         closeSettings();
     }
     
@@ -580,6 +592,7 @@ HTML_CONTENT = """
                     ai_engine_type: localStorage.getItem('ai_engine_type') || 'gemini',
                     gauss_endpoint: localStorage.getItem('gauss_endpoint') || '',
                     gauss_key: localStorage.getItem('gauss_key') || '',
+                    gauss_model: localStorage.getItem('gauss_model') || '',
                     ai_key: localStorage.getItem('ai_key'),
                     ai_model: localStorage.getItem('ai_model') || '',
                     gerrit_user: localStorage.getItem('gerrit_user'),
@@ -667,6 +680,7 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
             ai_engine = body.get('ai_engine_type', 'gemini')
             gauss_endpoint = body.get('gauss_endpoint', '')
             gauss_key = body.get('gauss_key', '')
+            gauss_model = body.get('gauss_model', '')
             ai_key = body.get('ai_key', '')
             ai_model = body.get('ai_model', '')
             g_user = body.get('gerrit_user', '')
@@ -698,7 +712,7 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                     else:
                         diff_data = fetch_gerrit_diff(meta['base_url'], meta['change_id'], g_user, g_token)
                     
-                    analysis_html = ai_engine_inst.analyze(meta, diff_data, ai_key, ai_model, ai_engine, gauss_endpoint, gauss_key)
+                    analysis_html = ai_engine_inst.analyze(meta, diff_data, ai_key, ai_model, ai_engine, gauss_endpoint, gauss_key, gauss_model)
                     meta['ai_analysis'] = analysis_html
                     
                 results.append(meta)
